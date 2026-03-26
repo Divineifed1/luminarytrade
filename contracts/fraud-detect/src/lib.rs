@@ -33,6 +33,8 @@ use soroban_sdk::{
     TryFromVal, Val, Vec,
 };
 
+mod batch;
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -47,6 +49,7 @@ pub enum DataKey {
     DetectionThresholds,
     TradingPatternHistory(Symbol),
     ContractState,
+    FlaggedAccount(Address),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -454,6 +457,14 @@ impl FraudDetectContract {
         let _duration = PerformanceMonitor::end_timer(&env, &Symbol::new(&env, "batch_analyze"));
 
         Ok(results)
+    }
+
+    pub fn batch_flag_fraud(
+        env: Env,
+        admin: Address,
+        flags: Vec<common_utils::batch::FraudFlag>,
+    ) -> Result<common_utils::batch::BatchResult, common_utils::batch::BatchError> {
+        batch::batch_flag_fraud(&env, &admin, flags)
     }
 
     pub fn invalidate_dex_cache(

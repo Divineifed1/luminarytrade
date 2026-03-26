@@ -20,6 +20,7 @@ use common_utils::treasury::TreasuryModule;
 mod validation;
 mod penalties;
 mod scoring;
+mod batch;
 
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -453,6 +454,14 @@ impl CreditScoreContract {
         let _duration = PerformanceMonitor::end_timer(&env, &Symbol::new(&env, "batch_calc"));
         
         Ok(scores)
+    }
+
+    pub fn batch_update_scores(
+        env: Env,
+        admin: Address,
+        updates: Vec<common_utils::batch::ScoreUpdate>,
+    ) -> Result<common_utils::batch::BatchResult, common_utils::batch::BatchError> {
+        batch::batch_update_scores(&env, &admin, updates)
     }
 
     pub fn update_signal_weights(

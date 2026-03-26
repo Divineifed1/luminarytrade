@@ -15,11 +15,16 @@ pub mod state_machine;
 pub mod dex;
 pub mod fees;
 pub mod treasury;
+pub mod acl;
+pub mod batch;
+pub mod authorization;
+pub mod compression;
+pub mod storage_optimization;
+pub mod storage_monitoring;
+pub mod data_migration;
 
 pub use error::CommonError;
 pub use state_machine::{State, StateMachine, FraudDetectState, RiskEvalState, CreditScoreState, state_guard, transition_to};
-pub mod acl;
-pub mod batch;
 
 use soroban_sdk::{
     contract,
