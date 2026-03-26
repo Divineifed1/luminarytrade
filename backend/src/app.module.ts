@@ -24,6 +24,7 @@ import { AppConfigService } from './config/app-config.service';
 import { MiddlewarePipelineModule } from './middleware-pipeline/middleware-pipeline.module';
 import { DecoratorCompositionModule } from './decorator-composition/decorator-composition.module';
 import { HealthModule } from './health/health.module';
+import { EventsModule } from './events/events.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { HealthModule } from './health/health.module';
     }),
     StartupModule,
     HealthModule,
+    EventsModule,
     PluginsModule,
     TypeOrmModule.forRootAsync({
       useFactory: (appConfig: AppConfigService) => {
