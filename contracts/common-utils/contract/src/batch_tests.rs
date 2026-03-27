@@ -293,3 +293,185 @@ fn test_batch_result_includes_gas_estimate() {
     let result = BatchExecutor::execute(&env, ops, RollbackStrategy::AllOrNothing).unwrap();
     assert_eq!(result.estimated_gas, GAS_COST_BATCH_OVERHEAD + GAS_COST_SCORE);
 }
+
+// --- New operation types ---
+
+fn update_score_op(env: &Env, score: u32) -> BatchOperation {
+    BatchOperation::UpdateScore(ScoreUpdate {
+        account_id: Address::generate(env),
+        score,
+    })
+}
+
+fn flag_fraud_op(env: &Env, reason_code: u32) -> BatchOperation {
+    BatchOperation::FlagFraud(FraudFlag {
+        account_id: Address::generate(env),
+        reason_code,
+    })
+}
+
+fn grant_role_op(env: &Env, role: u32) -> BatchOperation {
+    BatchOperation::GrantRole(RoleGrant {
+        account_id: Address::generate(env),
+        role,
+    })
+}
+
+fn update_oracle_op(env: &Env, price: u64) -> BatchOperation {
+    BatchOperation::UpdateOracle(OracleDataUpdate {
+        feed_id: symbol_short!("xlm_usd"),
+        price,
+        timestamp: 1_000_000,
+    })
+}
+
+#[test]
+fn test_update_score_valid() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(update_score_op(&env, 700));
+    let result = BatchExecutor::execute(&env, ops, RollbackStrategy::AllOrNothing).unwrap();
+    assert_eq!(result.succeeded, 1);
+    assert!(!result.rolled_back);
+}
+
+#[test]
+fn test_update_score_out_of_range_rejected() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(update_score_op(&env, 200)); // below 300
+    assert_eq!(BatchValidator::validate(&ops), Err(BatchError::ValidationFailed));
+}
+
+#[test]
+fn test_flag_fraud_valid() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(flag_fraud_op(&env, 5));
+    let result = BatchExecutor::execute(&env, ops, RollbackStrategy::AllOrNothing).unwrap();
+    assert_eq!(result.succeeded, 1);
+}
+
+#[test]
+fn test_flag_fraud_zero_reason_rejected() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(flag_fraud_op(&env, 0));
+    assert_eq!(BatchValidator::validate(&ops), Err(BatchError::ValidationFailed));
+}
+
+#[test]
+fn test_grant_role_valid() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(grant_role_op(&env, 2));
+    let result = BatchExecutor::execute(&env, ops, RollbackStrategy::AllOrNothing).unwrap();
+    assert_eq!(result.succeeded, 1);
+}
+
+#[test]
+fn test_grant_role_invalid_rejected() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(grant_role_op(&env, 5)); // max is 4
+    assert_eq!(BatchValidator::validate(&ops), Err(BatchError::ValidationFailed));
+}
+
+#[test]
+fn test_update_oracle_valid() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(update_oracle_op(&env, 12_500_000));
+    let result = BatchExecutor::execute(&env, ops, RollbackStrategy::AllOrNothing).unwrap();
+    assert_eq!(result.succeeded, 1);
+}
+
+#[test]
+fn test_update_oracle_zero_price_rejected() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(update_oracle_op(&env, 0));
+    assert_eq!(BatchValidator::validate(&ops), Err(BatchError::ValidationFailed));
+}
+
+#[test]
+fn test_max_batch_size_is_100() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    for _ in 0..MAX_BATCH_SIZE {
+        ops.push_back(update_score_op(&env, 500));
+    }
+    // exactly 100 should pass
+    assert!(BatchValidator::validate(&ops).is_ok());
+
+    // 101 should fail
+    ops.push_back(update_score_op(&env, 500));
+    assert_eq!(BatchValidator::validate(&ops), Err(BatchError::BatchSizeExceeded));
+}
+
+#[test]
+fn test_dedup_update_score_keeps_last() {
+    let env = make_env();
+    let account = Address::generate(&env);
+    let mut ops = Vec::new(&env);
+    ops.push_back(BatchOperation::UpdateScore(ScoreUpdate { account_id: account.clone(), score: 400 }));
+    ops.push_back(BatchOperation::UpdateScore(ScoreUpdate { account_id: account.clone(), score: 750 }));
+
+    let deduped = OperationDeduplicator::deduplicate(&env, ops);
+    assert_eq!(deduped.len(), 1);
+    if let BatchOperation::UpdateScore(s) = deduped.get(0).unwrap() {
+        assert_eq!(s.score, 750);
+    } else {
+        panic!("Expected UpdateScore");
+    }
+}
+
+#[test]
+fn test_dedup_oracle_keeps_last_per_feed() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(BatchOperation::UpdateOracle(OracleDataUpdate {
+        feed_id: symbol_short!("xlm_usd"),
+        price: 100,
+        timestamp: 1000,
+    }));
+    ops.push_back(BatchOperation::UpdateOracle(OracleDataUpdate {
+        feed_id: symbol_short!("xlm_usd"),
+        price: 200,
+        timestamp: 2000,
+    }));
+
+    let deduped = OperationDeduplicator::deduplicate(&env, ops);
+    assert_eq!(deduped.len(), 1);
+    if let BatchOperation::UpdateOracle(o) = deduped.get(0).unwrap() {
+        assert_eq!(o.price, 200);
+    } else {
+        panic!("Expected UpdateOracle");
+    }
+}
+
+#[test]
+fn test_mixed_new_types_batch() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    ops.push_back(update_score_op(&env, 650));
+    ops.push_back(flag_fraud_op(&env, 3));
+    ops.push_back(grant_role_op(&env, 1));
+    ops.push_back(update_oracle_op(&env, 5_000_000));
+
+    let result = BatchExecutor::execute(&env, ops, RollbackStrategy::AllOrNothing).unwrap();
+    assert_eq!(result.total, 4);
+    assert_eq!(result.succeeded, 4);
+    assert!(!result.rolled_back);
+}
+
+#[test]
+fn test_gas_savings_new_types() {
+    let env = make_env();
+    let mut ops = Vec::new(&env);
+    for _ in 0..10 {
+        ops.push_back(update_score_op(&env, 500));
+    }
+    let savings = GasEstimator::savings_bps(&ops);
+    assert!(savings > 3000, "Expected >30% savings, got {}bps", savings);
+}

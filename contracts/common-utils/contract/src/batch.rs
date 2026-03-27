@@ -12,13 +12,17 @@ use soroban_sdk::{
 use crate::error::{ContractError, ErrorCategory};
 
 /// Maximum operations per batch
-pub const MAX_BATCH_SIZE: u32 = 50;
+pub const MAX_BATCH_SIZE: u32 = 100;
 
 /// Estimated base gas cost per operation type
 pub const GAS_COST_REPORT: u64 = 100_000;
 pub const GAS_COST_SCORE: u64 = 80_000;
 pub const GAS_COST_METADATA: u64 = 120_000;
 pub const GAS_COST_RISK: u64 = 90_000;
+pub const GAS_COST_UPDATE_SCORE: u64 = 80_000;
+pub const GAS_COST_FLAG_FRAUD: u64 = 90_000;
+pub const GAS_COST_GRANT_ROLE: u64 = 70_000;
+pub const GAS_COST_UPDATE_ORACLE: u64 = 85_000;
 pub const GAS_COST_BATCH_OVERHEAD: u64 = 50_000;
 
 // --- Errors (1700-1799) ---
@@ -113,11 +117,44 @@ pub struct RiskEvaluation {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScoreUpdate {
+    pub account_id: Address,
+    pub score: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FraudFlag {
+    pub account_id: Address,
+    pub reason_code: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleGrant {
+    pub account_id: Address,
+    pub role: u32, // maps to acl::Role
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleDataUpdate {
+    pub feed_id: Symbol,
+    pub price: u64,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchOperation {
     Report(ReportSubmission),
     Score(ScoreCalculation),
     Metadata(MetadataUpdate),
     Risk(RiskEvaluation),
+    UpdateScore(ScoreUpdate),
+    FlagFraud(FraudFlag),
+    GrantRole(RoleGrant),
+    UpdateOracle(OracleDataUpdate),
 }
 
 // --- Per-operation result ---
@@ -176,6 +213,10 @@ impl GasEstimator {
             BatchOperation::Score(_) => GAS_COST_SCORE,
             BatchOperation::Metadata(_) => GAS_COST_METADATA,
             BatchOperation::Risk(_) => GAS_COST_RISK,
+            BatchOperation::UpdateScore(_) => GAS_COST_UPDATE_SCORE,
+            BatchOperation::FlagFraud(_) => GAS_COST_FLAG_FRAUD,
+            BatchOperation::GrantRole(_) => GAS_COST_GRANT_ROLE,
+            BatchOperation::UpdateOracle(_) => GAS_COST_UPDATE_ORACLE,
         }
     }
 
@@ -237,6 +278,18 @@ impl OperationDeduplicator {
                 ma.agent == mb.agent
             }
             (BatchOperation::Risk(ea), BatchOperation::Risk(eb)) => ea.agent == eb.agent,
+            (BatchOperation::UpdateScore(a), BatchOperation::UpdateScore(b)) => {
+                a.account_id == b.account_id
+            }
+            (BatchOperation::FlagFraud(a), BatchOperation::FlagFraud(b)) => {
+                a.account_id == b.account_id
+            }
+            (BatchOperation::GrantRole(a), BatchOperation::GrantRole(b)) => {
+                a.account_id == b.account_id
+            }
+            (BatchOperation::UpdateOracle(a), BatchOperation::UpdateOracle(b)) => {
+                a.feed_id == b.feed_id
+            }
             _ => false,
         }
     }
@@ -282,6 +335,26 @@ impl BatchValidator {
                     return Err(BatchError::ValidationFailed);
                 }
             }
+            BatchOperation::UpdateScore(s) => {
+                if s.score < 300 || s.score > 850 {
+                    return Err(BatchError::ValidationFailed);
+                }
+            }
+            BatchOperation::FlagFraud(f) => {
+                if f.reason_code == 0 {
+                    return Err(BatchError::ValidationFailed);
+                }
+            }
+            BatchOperation::GrantRole(r) => {
+                if r.role > 4 {
+                    return Err(BatchError::ValidationFailed);
+                }
+            }
+            BatchOperation::UpdateOracle(o) => {
+                if o.price == 0 || o.timestamp == 0 {
+                    return Err(BatchError::ValidationFailed);
+                }
+            }
         }
         Ok(())
     }
@@ -307,6 +380,9 @@ impl BatchExecutor {
         let mut succeeded: u32 = 0;
         let mut failed: u32 = 0;
 
+        env.events()
+            .publish((symbol_short!("batch_st"),), total);
+
         for i in 0..total {
             let op = operations.get(i).unwrap();
             let outcome = Self::execute_single(env, &op);
@@ -324,7 +400,6 @@ impl BatchExecutor {
                     failed += 1;
                     match strategy {
                         RollbackStrategy::AllOrNothing => {
-                            // Mark previous successes as rolled back
                             let mut rolled = Vec::new(env);
                             for r in results.iter() {
                                 rolled.push_back(OperationResult {
@@ -340,6 +415,9 @@ impl BatchExecutor {
                             });
 
                             Self::rollback(env, &operations, i);
+
+                            env.events()
+                                .publish((symbol_short!("batch_fl"),), (i, code));
 
                             return Ok(BatchResult {
                                 total,
@@ -361,6 +439,9 @@ impl BatchExecutor {
                 }
             }
         }
+
+        env.events()
+            .publish((symbol_short!("batch_ok"),), (succeeded, failed));
 
         Ok(BatchResult {
             total,
@@ -419,6 +500,48 @@ impl BatchExecutor {
                 );
                 Ok(())
             }
+            BatchOperation::UpdateScore(s) => {
+                let key = (symbol_short!("b_uscr"), s.account_id.clone());
+                env.storage().temporary().set(&key, &s.score);
+
+                env.events().publish(
+                    (symbol_short!("b_uscr"), s.account_id.clone()),
+                    s.score,
+                );
+                Ok(())
+            }
+            BatchOperation::FlagFraud(f) => {
+                let key = (symbol_short!("b_fraud"), f.account_id.clone());
+                env.storage().temporary().set(&key, &f.reason_code);
+
+                env.events().publish(
+                    (symbol_short!("b_fraud"), f.account_id.clone()),
+                    f.reason_code,
+                );
+                Ok(())
+            }
+            BatchOperation::GrantRole(r) => {
+                let key = (symbol_short!("b_role"), r.account_id.clone());
+                env.storage().temporary().set(&key, &r.role);
+
+                env.events().publish(
+                    (symbol_short!("b_role"), r.account_id.clone()),
+                    r.role,
+                );
+                Ok(())
+            }
+            BatchOperation::UpdateOracle(o) => {
+                let key = (symbol_short!("b_orc"), o.feed_id.clone());
+                env.storage()
+                    .temporary()
+                    .set(&key, &(o.price, o.timestamp));
+
+                env.events().publish(
+                    (symbol_short!("b_orc"), o.feed_id.clone()),
+                    (o.price, o.timestamp),
+                );
+                Ok(())
+            }
         }
     }
 
@@ -449,6 +572,22 @@ impl BatchExecutor {
             }
             BatchOperation::Risk(r) => {
                 let key = (symbol_short!("b_risk"), r.agent.clone());
+                env.storage().temporary().remove(&key);
+            }
+            BatchOperation::UpdateScore(s) => {
+                let key = (symbol_short!("b_uscr"), s.account_id.clone());
+                env.storage().temporary().remove(&key);
+            }
+            BatchOperation::FlagFraud(f) => {
+                let key = (symbol_short!("b_fraud"), f.account_id.clone());
+                env.storage().temporary().remove(&key);
+            }
+            BatchOperation::GrantRole(r) => {
+                let key = (symbol_short!("b_role"), r.account_id.clone());
+                env.storage().temporary().remove(&key);
+            }
+            BatchOperation::UpdateOracle(o) => {
+                let key = (symbol_short!("b_orc"), o.feed_id.clone());
                 env.storage().temporary().remove(&key);
             }
         }
